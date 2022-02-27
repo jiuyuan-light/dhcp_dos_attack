@@ -44,12 +44,8 @@ void Bind_Info::setupTabs()
     tableView->setSelectionMode(QAbstractItemView::SingleSelection);
     tableView->setSortingEnabled(true);
 
-//    tableView->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
-//    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-//    tableView->horizontalHeader()->setMinimumSectionSize(1000);
-//    tableView->verticalHeader()->setMinimumSectionSize(1000);
-
-    tableView->verticalHeader()->setMinimumSectionSize(10000);
+    tableView->setColumnWidth(0, 200);
+    tableView->setColumnWidth(1, 200);
 
     addTab(tableView, tr("BIND信息"));
 }

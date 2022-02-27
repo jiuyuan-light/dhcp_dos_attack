@@ -13,6 +13,7 @@
 #include <QItemSelection>
 #include <QTabWidget>
 #include <QTimer>
+#include <QDebug>
 
 QT_BEGIN_NAMESPACE
 class QSortFilterProxyModel;
@@ -24,15 +25,27 @@ class Contact
 public:
     QString ip;
     QString mac;
+    QString giaddr;
     QString serverid;
 
+    qint32 id;
+    qint32 xid;
+
     Contact() {};
-    Contact(QString &ip, QString &mac):ip(ip), mac(mac) {};
+    Contact(QString &ip, QString &mac, qint32 xid=0x0, qint32 id=0x0):ip(ip), mac(mac), xid(xid), id(id) {};
     Contact(QString &data);
+
+    void add_giaddr(QString &giaddr) {
+        this->giaddr = giaddr;
+    }
 
     bool operator==(const Contact &other) const
     {
         return ip == other.ip && mac == other.mac;
+    }
+
+    void show() {
+        qDebug() << ip + " " + mac + "" << xid << endl;
     }
 };
 
@@ -68,8 +81,9 @@ public:
 
     void addEntry(const Contact &);
 
-private:
     TableModel *table;
+
+private:
     QStringList &datalist;
 
     void setupTabs();

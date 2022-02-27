@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 from scapy.layers.inet import *
 from scapy.layers.l2 import Ether, ARP
 from scapy.sendrecv import sendp
@@ -172,7 +173,7 @@ class sup_manage(object):
                 sendp(arp, iface = conf.iface)
         elif (ICMP in packet and packet[ICMP].type == 8): #ICMP REQUEST
             if (self.arp_table.is_in(packet[IP].dst)):
-                icmp_reply = copy.copy(packet)
+                icmp_reply = copy.deepcopy(packet)
                 icmp_reply[Ether].src = packet[Ether].dst
                 icmp_reply[Ether].dst = packet[Ether].src
                 icmp_reply[IP].src = packet[IP].dst

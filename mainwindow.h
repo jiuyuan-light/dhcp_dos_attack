@@ -23,6 +23,7 @@ protected:
     void closeEvent(QCloseEvent *event);
 
     QSplitter *splitterMain;
+    Bind_Info *bind_info;
 
 private:
     Ui::MainWindow *ui;

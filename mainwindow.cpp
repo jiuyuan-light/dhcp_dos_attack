@@ -19,13 +19,21 @@ void MainWindow::closeEvent(QCloseEvent * event)
 //        break;
 //    }
 
-
     if (net == nullptr) {
         return;
     }
 
+    if (net->table) {
+        net->table->close();
+    }
+
+    QFile file(net->cfgpathname);
+    file.remove();
+
     //结束子进程
     if (net->RunPy != nullptr) {
+        net->RunPy->execute("taskkill", QStringList() << "-f"<<"-im"<<"dhcp_client*");
+        net->RunPy->execute("taskkill", QStringList() << "-f"<<"-im"<<"evb*");
         net->RunPy->kill();
     }
 
@@ -40,13 +48,11 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    //新建一个水平分割窗对象，作为主布局框
-    QSplitter *splitterMain =new QSplitter(Qt::Horizontal, nullptr);
-    //设置主布局框即水平分割窗的标题
-    splitterMain->setWindowTitle(QObject::tr("DHCPC"));
-    splitterMain->setParent(this);
+    setWindowTitle(QObject::tr("DHCPC"));
 
-    // 之后要实现为单例模式
+    QSplitter *splitterMain =new QSplitter(Qt::Vertical, nullptr);
+    setCentralWidget(splitterMain);
+
     net = new DHCPC_CTRL(splitterMain);
 }
 

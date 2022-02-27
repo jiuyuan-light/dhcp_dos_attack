@@ -1,4 +1,4 @@
-#python -3-64
+# -*- coding:utf-8 -*-
 from scapy.all import *
 from scapy.layers.dhcp import BOOTP, DHCP
 from scapy.layers.inet import *
@@ -8,6 +8,7 @@ from dhcp_sup import PseudoThread
 import argparse
 import logging
 from scapy.config import conf
+
 conf.logLevel = logging.ERROR
 
 logger = logging.getLogger('dhcp_client')
@@ -44,10 +45,8 @@ def dhcp_re_trans():
 def show_state():
     logger.debug("all client count:%d bound count:%d , ..." % (M_DHCP_CLIENT_CENTER.get_dhcpc_count(), M_DHCP_CLIENT_CENTER.get_dhcpc_bound_count()))
     if (M_DHCP_CLIENT_CENTER.get_dhcpc_count() == M_DHCP_CLIENT_CENTER.get_dhcpc_bound_count()):
-        i = 1
         for client in M_DHCP_CLIENT_CENTER.get_dhcpc_list():
-            client.bound_show(i)
-            i += 1
+            client.bound_show()
         return
     PseudoThread.async_run_later_event(show_state, 3)
 
@@ -56,7 +55,9 @@ def main():
     parser.add_argument('interface', nargs='?', help='interface to configure with DHCP')
     parser.add_argument('-n', '--nums', help='client nums')
     parser.add_argument('-d', '--debug', help='Set logging level to debug', action='store_true')
+    parser.add_argument('-f', '--file', help='load config file')
 
+    logger.setLevel(logging.DEBUG)
     args = parser.parse_args()
     if args.debug:
         logger.setLevel(logging.DEBUG)
@@ -67,7 +68,10 @@ def main():
     if args.nums is None:
         logger.error('not input nums, default 1')
         args.nums = 1
-    logger.setLevel(logging.DEBUG)
+
+    if args.file is None:
+        logger.info('no cfg file')
+    
     # do not put interfaces in promiscuous mode
     conf.sniff_promisc = conf.promisc = 0
     #conf.checkIPaddr = 1
@@ -82,7 +86,7 @@ def main():
 
     logger.debug("########################[nice weather today]########################")
     
-    center = M_DHCP_CLIENT_CENTER(int(args.nums))
+    center = M_DHCP_CLIENT_CENTER(int(args.nums), args.file)
     center.start()
 
     PseudoThread.async_run_now(show_state)

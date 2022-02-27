@@ -1,4 +1,6 @@
+# -*- coding:utf-8 -*-
 from random import randint
+from tkinter.messagebox import NO
 from scapy.all import *
 from scapy.layers.dhcp import BOOTP, DHCP
 from scapy.layers.inet import *
@@ -6,6 +8,7 @@ from scapy.utils import mac2str, hex_bytes
 from socket import *
 from multiprocessing import shared_memory
 from dhcp_sup import *
+import json
 
 logger = logging.getLogger('dhcp_client')
 
@@ -100,9 +103,17 @@ def randomMAC(serial=False):
     return ':'.join(map(lambda x: "%02x" % x, mac))
 
 class M_DHCP_CLIENT_ENTRY():
-    def __init__(self):
-        self.req_attr = {   'xid' : 0x0,
-                            'mac' : None,
+    _giaddr_map = {}
+    def __init__(self, mac = None, xid = None, giaddr = None):
+        if xid is None:
+            self.fixxid = False
+        else:
+            self.fixxid = True
+        
+        self.req_attr = {
+                            'giaddr' : giaddr,
+                            'xid' : xid,
+                            'mac' : mac,
                             'chaddr' : None,
                             'hostname' : 'nbk',
                             'interval' : 10, # 重传时间，暂时没用到，目前统一重传
@@ -111,6 +122,18 @@ class M_DHCP_CLIENT_ENTRY():
         self.get_attr = {   'server_id' : None,
                             'get_ip' : None,
                                 }
+    @property
+    def giaddr_mac(self):
+        if self.req_attr['giaddr'] is None:
+            return None
+        if self.req_attr['giaddr'] in M_DHCP_CLIENT_ENTRY._giaddr_map:
+           return M_DHCP_CLIENT_ENTRY._giaddr_map[self.req_attr['giaddr']]
+        else:
+            M_DHCP_CLIENT_ENTRY._giaddr_map[self.req_attr['giaddr']] = randomMAC()
+            return M_DHCP_CLIENT_ENTRY._giaddr_map[self.req_attr['giaddr']]
+    def add_giaddr2sup_manage(self):
+        M_DHCP_CLIENT_CENTER.sup.add_dhcp_bind(self.req_attr['giaddr'], self.giaddr_mac)
+
     def get_attr_by_dhcp(self, pkt):
         for mess in pkt['DHCP options'].options:
             if (len(mess) == 2 and mess[0] == "server_id"):
@@ -131,10 +154,17 @@ class M_DHCP_CLIENT_ENTRY():
         ip_header = IP(src = ZERO_IP, dst = BROADSTCAST_IP)
         eth_header = Ether(src = self.req_attr['mac'], dst=BROADSTCAST_MAC)
 
+        if self.req_attr['giaddr'] != None:
+            return Ether(src = self.giaddr_mac, dst=BROADSTCAST_MAC) / IP(src = self.req_attr['giaddr'], dst = BROADSTCAST_IP) / udp_header / \
+            BOOTP(chaddr = self.req_attr['chaddr'], xid = self.req_attr['xid'], yiaddr = self.get_attr['get_ip'], giaddr = self.req_attr['giaddr'], flags=0x8000) \
+            / dhcp_pkt
+
         return eth_header / ip_header / udp_header / bootp_pkt / dhcp_pkt
     def gen_discover(self):
-        self.req_attr['mac'] = randomMAC()
-        self.req_attr['xid'] = randint(0, 0xffffffff)
+        if self.req_attr['mac'] is None:
+            self.req_attr['mac'] = randomMAC()
+        if self.fixxid is not True:
+            self.req_attr['xid'] = randint(0, 0xffffffff)
         self.req_attr['chaddr'] = mac2str(self.req_attr['mac'])
 
         dhcp_pkt = DHCP(options=[("message-type", "discover"),
@@ -148,6 +178,12 @@ class M_DHCP_CLIENT_ENTRY():
         udp_header = UDP(sport=SRC_PORT, dport=DST_PORT)
         ip_header = IP(src = ZERO_IP, dst = BROADSTCAST_IP)
         eth_header = Ether(src = self.req_attr['mac'], dst=BROADSTCAST_MAC)
+
+        if self.req_attr['giaddr'] != None:
+            self.add_giaddr2sup_manage()
+            return Ether(src = self.giaddr_mac, dst=BROADSTCAST_MAC) / IP(src = self.req_attr['giaddr'], dst = BROADSTCAST_IP) / udp_header / \
+            BOOTP(chaddr=self.req_attr['chaddr'], xid=self.req_attr['xid'], giaddr = self.req_attr['giaddr'], flags=0x8000) \
+            / dhcp_pkt
 
         return  eth_header / ip_header / udp_header / bootp_pkt / dhcp_pkt
 
@@ -168,8 +204,9 @@ DHCPS_BIND          = 4
 DHCPS_STOP          = 5
 
 class M_DHCP_CLIENT_FSM():
-    def __init__(self) -> None:
-        self.entry = M_DHCP_CLIENT_ENTRY()
+    def __init__(self, id = 0, mac = None, xid = None, giaddr = None) -> None:
+        self.id = id
+        self.entry = M_DHCP_CLIENT_ENTRY(mac, xid, giaddr)
         self.rc_pkt = None
         self.gen_pkt = None
         self.retrans_times = 0
@@ -217,11 +254,18 @@ class M_DHCP_CLIENT_FSM():
         self.get_fsm_fun()(event)
         
 
-    def bound_show(self, id):
+    def bound_show(self):
         if (self.get_dhcpc_state() == DHCPS_BIND):
-            logger.debug("id:%d :ip(%s), mac(%s), server(%s)\n" % (id, self.entry.get_attr['get_ip'], self.entry.req_attr['mac'], self.entry.get_attr['server_id']))
-            M_DHCP_CLIENT_CENTER.sup.add_dhcp_bind(self.entry.get_attr['get_ip'], self.entry.req_attr['mac'])
-            
+            logger.debug("local bound, id:%d :ip(%s), mac(%s), server(%s)\n" % (self.id, self.entry.get_attr['get_ip'], self.entry.req_attr['mac'], self.entry.get_attr['server_id']))
+
+    def write(self):
+        M_DHCP_CLIENT_CENTER.sup.add_dhcp_bind(self.entry.get_attr['get_ip'], self.entry.req_attr['mac'])
+        M_DHCP_CLIENT_CENTER.sup.set_gateway_by_dhcp(self.entry.get_attr['server_id'])
+        if (M_DHCP_CLIENT_CENTER.shm is None):
+            return
+        msg = self.entry.get_attr['get_ip'] +',' + self.entry.req_attr['mac'] +',' + self.entry.get_attr['server_id']
+        logger.debug("add to gui, id:%d msg(%s)" % (self.id, msg))
+        M_DHCP_CLIENT_CENTER.shm.write_one_msg(msg)
     def sync_fsm_event(self, event):
         self.lock.acquire()
         state = self.get_dhcpc_state()
@@ -300,6 +344,7 @@ class M_DHCP_CLIENT_FSM():
             M_DHCP_CLIENT_CENTER.dhcpc_bound_count_inc()
             
             self.entry.req_attr['xid'] = 0x0
+            self.write()
         else:
             pass
             #client.fsm.process_event(DH_Admin_stop)
@@ -314,20 +359,38 @@ class M_DHCP_CLIENT_CENTER():
     max_retrans_times = 3
     __dhcpc_bound_nums = 0
     clients_re_trans_list = []
-    
+
     try:
-        __shm = m_shm(DHCPC_SHM_WITH_HANDLE_NAME)
+        shm = m_shm(DHCPC_SHM_WITH_HANDLE_NAME)
     except FileNotFoundError:
         logger.error("open shm file fail, maybe can ignore")
-        __shm = None
+        shm = None
     
     # 从dhcp server获取地址后，可以对ping请求报文进行回应
     sup = sup_manage()
     sup.start()
-    def __init__(self, nums = 1) -> None:
+    def __init__(self, nums = 1, need_cfg = False) -> None:
         M_DHCP_CLIENT_CENTER.__dhcpc_nums = nums
+
+        if need_cfg:
+            logger.debug("load cfgfile:" + need_cfg)
+            with open(need_cfg) as f:
+                cfgs = json.load(f)
+
         for i in range(nums):
-            client = M_DHCP_CLIENT_FSM()
+            mac = None
+            xid = None
+            giaddr = None
+            if need_cfg:
+                if str(i) in cfgs:
+                    cfg = cfgs[str(i)]
+                    if len(cfg['mac']) != 0:
+                        mac = cfg['mac']
+                    if cfg['xid'] != 0:
+                        xid = cfg['xid']
+                    if len(cfg['giaddr']) != 0:
+                        giaddr = cfg['giaddr']
+            client = M_DHCP_CLIENT_FSM(i, mac, xid, giaddr)
             M_DHCP_CLIENT_CENTER.__client_list.append(client)
 
     def get_dhcpc_count():
@@ -345,9 +408,3 @@ class M_DHCP_CLIENT_CENTER():
     def start(self):
         for client in M_DHCP_CLIENT_CENTER.get_dhcpc_list():
             client.start()
-    def add2sup_manage(self):
-        self.__sup.add_dhcp_bind(self.ip, self.mac)
-        self.__sup.set_gateway_by_dhcp(self.server_id)
-    def write(self):
-        if (self.__shm is None):
-            return

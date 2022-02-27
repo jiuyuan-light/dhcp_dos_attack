@@ -33,6 +33,13 @@ DHCPC_CTRL::DHCPC_CTRL(QWidget *parent):QWidget(parent),datalist(new QStringList
     /* 创建两个按钮 */
     StartBtn =new QPushButton(tr("开始"));
     StopBtn =new QPushButton(tr("停止"));
+    StopBtn->setEnabled(false);
+
+    //    初始化扩展窗口
+    InitDetailPart();
+    CtrlLayout->setColumnStretch(0, 0);
+    CtrlLayout->setColumnStretch(1, 0);
+    CtrlLayout->setColumnStretch(2, 1);
 
     //网卡布局
     CtrlLayout->addWidget(netboxLabel,0,0);
@@ -40,19 +47,17 @@ DHCPC_CTRL::DHCPC_CTRL(QWidget *parent):QWidget(parent),datalist(new QStringList
     CtrlLayout->addWidget(client_cnt,1,0);
     CtrlLayout->addWidget(client_cnt_edit,1,1);
     CtrlLayout->addLayout(BtnLayout, 2, 0);
+    CtrlLayout->addWidget(DetailBtn, 2, 1);
     CtrlLayout->addWidget(bind_info, 3,2);
-
-    CtrlLayout->setColumnStretch(0,1);
-    CtrlLayout->setColumnStretch(1,1);
-    CtrlLayout->setColumnStretch(2,5);
 
     BtnLayout->addWidget(StartBtn);
     BtnLayout->addWidget(StopBtn);
-    StopBtn->setEnabled(false);
+    BtnLayout->addStretch(2);
 
 //    信号
     connect(StartBtn, SIGNAL(clicked()), this, SLOT(StartOperator()));
     connect(StopBtn, SIGNAL(clicked()), this, SLOT(StopOperator()));
+    connect(client_cnt_edit, SIGNAL(textChanged(QString)),this,SLOT(upDetailInfo()));
 
     qDebug() << "DHCPC CONTROL INIT OK"  << endl;
 }
@@ -78,10 +83,140 @@ void DHCPC_CTRL::GetNetworkCardName(QList<QString> &card)
         }
 
         card.append(itf.humanReadableName());
-
 //        detail=detail+tr("设备：")+interface.humanReadableName()+"\n";
     }
 //    QMessageBox::information(this,tr("Detail"),detail);
+}
+
+void DHCPC_CTRL::showDetailInfo()
+{
+    upDetailInfo();
+
+    if(table->isHidden()) {
+        table->show();
+    }
+}
+
+void DHCPC_CTRL::upDetailInfo()
+{
+    model->setRowCount(get_dhcpc_nums());
+}
+
+void DHCPC_CTRL::GetCfg(void)
+{
+    QString ip;
+    QString mac;
+    QString giaddr;
+    qint32 xid = 0x0;
+    bool ok;
+
+    need_cfg = false;
+    for (int i = 0; i < get_dhcpc_nums(); i++) {
+        for (int j = 0; j < 4; j++) {
+            QModelIndex index = model->index(i,j);
+            QString data = model->data(index).toString();
+            switch (j) {
+            case 0:
+                ip = data;
+                break;
+            case 1:
+                mac = data;
+                if (mac.length() != 0) {
+                    need_cfg = true;
+                }
+                break;
+            case 2:
+                xid = data.toInt(&ok, 16);
+                if (ok && xid != 0) {
+                    need_cfg = true;
+                }
+                break;
+            case 3:
+                giaddr = data;
+                if (giaddr.length() != 0) {
+                    need_cfg = true;
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        Contact c(ip, mac, xid, i);
+        c.add_giaddr(giaddr);
+        cfg.append(c);
+    }
+}
+
+void DHCPC_CTRL::write2cfgfile(void)
+{
+    QMap<QString, QVariant> m_map;
+    QMap<QString, QVariant> map;
+
+    QFile file(cfgpathname);
+
+    if(!file.open(QIODevice::ReadWrite)) {
+        qDebug() << "File open error";
+    } else {
+        qDebug() <<"File open succ:" + cfgpathname << endl;
+    }
+
+    file.resize(0);
+
+    //    没有权限
+    //    unlink(pathname.toLatin1().data());
+
+    for (auto &c : cfg) {
+        map.insert("mac", c.mac);
+        map.insert("xid", c.xid);
+        map.insert("giaddr", c.giaddr);
+
+        m_map.insert(QString::number(c.id), map);
+        qDebug() << "##[write2cfgfile]##mac:" << c.mac << "xid:" << c.xid <<" i:" << c.id <<" giaddr:" << c.giaddr << endl;
+    }
+
+    QJsonDocument doc=QJsonDocument::fromVariant(QVariant(m_map));
+    file.write(doc.toJson());
+    file.close();
+}
+
+void DHCPC_CTRL::InitDetailPart(void)
+{
+    DetailBtn =new QPushButton(tr("详细配置"));
+
+    model = new QStandardItemModel(get_dhcpc_nums(), 4, this);
+    model->setHeaderData(0,Qt::Horizontal,tr("IP"));
+    model->setHeaderData(1,Qt::Horizontal,tr("MAC"));
+    model->setHeaderData(2,Qt::Horizontal,tr("XID(0x)"));
+    model->setHeaderData(3,Qt::Horizontal,tr("GIADDR"));
+
+    table = new QTableView();
+    table->setModel(model);
+    table->setWindowTitle(tr("DETAIL CONFIG"));
+    QItemSelectionModel *selectionModel = new QItemSelectionModel(model);
+    table->setSelectionModel(selectionModel);
+    table->hide();
+
+    // 限制输入
+    ReadOnlyDelegate* readOnlyDelegate = new ReadOnlyDelegate();
+    table->setItemDelegateForColumn(0, readOnlyDelegate);
+
+    InputDelegate *macAddrDelegate = new InputDelegate(InputDelegate_MAC);
+    table->setItemDelegateForColumn(1, macAddrDelegate);
+
+    InputDelegate *xidDelegate = new InputDelegate(InputDelegate_XID);
+    table->setItemDelegateForColumn(2, xidDelegate);
+
+    InputDelegate *giAddrDelegate = new InputDelegate(InputDelegate_GIADDR);
+    table->setItemDelegateForColumn(3, giAddrDelegate);
+
+    // 限制输入 END
+
+    table->resize(QSize(600, 300));
+
+    cfgpathname = QCoreApplication::applicationDirPath().append("/._cfg.json");
+
+    connect(DetailBtn,SIGNAL(clicked()),this,SLOT(showDetailInfo()));
 }
 
 void DHCPC_CTRL::StartOperator()
@@ -100,6 +235,9 @@ void DHCPC_CTRL::StartOperator()
     StartBtn->setEnabled(false);
     StopBtn->setEnabled(true);
 
+    GetCfg();
+    write2cfgfile();
+
     // shm初始化
     shareMemory_init();
 
@@ -108,9 +246,18 @@ void DHCPC_CTRL::StartOperator()
     }
     connect(update_time,SIGNAL(timeout()),this,SLOT(show_progressBar()));
 
-    QString py_scr = QCoreApplication::applicationDirPath().append("/py/dhcp_client.py ") + netbox->currentText() + " -n " + QString::number(nums);
-//    QString exec = QCoreApplication::applicationDirPath().append("/python.exe ") + py_scr;
-    QString exec = tr("python.exe ") + py_scr;
+     //删除所有行
+    if (bind_info && bind_info->table) {
+        bind_info->table->removeRows(0, model->rowCount());
+    }
+
+
+    QString exec;
+    if (need_cfg) {
+        exec = QCoreApplication::applicationDirPath().append("/dhcp_client.exe ") + netbox->currentText() + " -n " + QString::number(nums) + " -f " + cfgpathname;
+    } else {
+        exec = QCoreApplication::applicationDirPath().append("/dhcp_client.exe ") + netbox->currentText() + " -n " + QString::number(nums);
+    }
 
     qDebug() << "exec paht:" << exec << endl;
 
@@ -129,10 +276,9 @@ void DHCPC_CTRL::StopOperator()
     StopBtn->setEnabled(false);
 
     if (RunPy) {
-        if (RunPy->state() == QProcess::Running) {
-            RunPy->kill();
-        }
-
+        RunPy->execute("taskkill", QStringList() << "-f"<<"-im"<<"dhcp_client*");
+        RunPy->execute("taskkill", QStringList() << "-f"<<"-im"<<"evb*");
+        RunPy->kill();
         delete RunPy;
         RunPy = nullptr;
     }
@@ -191,10 +337,12 @@ void DHCPC_CTRL::read_data(void)
 void DHCPC_CTRL::show_progressBar()
 {
     read_data();
+    qDebug() << "client nums:"<< datalist->length() << endl; // needs -1
     for (auto l : *datalist) {
         if (l.size() < 2) {
             return;
         }
+
         bind_info->addEntry(Contact(l));
     }
 }

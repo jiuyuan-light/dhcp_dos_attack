@@ -1,16 +1,13 @@
-# -*- coding:utf-8 -*-
 from random import randint
-from tkinter.messagebox import NO
 from scapy.all import *
 from scapy.layers.dhcp import BOOTP, DHCP
 from scapy.layers.inet import *
 from scapy.utils import mac2str, hex_bytes
 from socket import *
-from multiprocessing import shared_memory
 from dhcp_sup import *
 from dhcpc_utils import NonBlockingQueueSimpleFactory
 
-from dhcpc_gui_sup import DHCPC_PKT_CFG_FROMUI
+from state_machine import State, Event, acts_as_state_machine, after, before, InvalidStateTransition
 
 logger = logging.getLogger('dhcp_client')
 
@@ -293,7 +290,7 @@ class DHCPC_ENTRY_INST():
         if (ops[53]):
             msgtype = ops[53]
         else:
-            print("ERROR message-type")
+            logger.debug("ERROR message-type")
             return None
 
         if (ops[55]):
@@ -325,179 +322,142 @@ class DHCPC_ENTRY_INST():
         pkt = eth_header / ip_header / udp_header / bootp_pkt / dhcp_pkt
         return pkt
 
-#event
-DH_Send_Discover    = 0
-DH_ReSend_Packet    = 1
-DH_Recv_Offer       = 2
-DH_Select_Done      = 3
-DH_Recv_Ack         = 4
-DH_Admin_stop       = 5
-DH_NO_RECV_REPLY   = 6
-#fsm status
-DHCPS_INIT          = 0
-DHCPS_INIT_PROC     = 1
-DHCPS_SELECT        = 2
-DHCPS_REQUEST_PROC  = 3
-DHCPS_BIND          = 4
-DHCPS_STOP          = 5
-
 class DhcpcBindsEntryInfo():
     def __init__(self, ip, mac) -> None:
         self.ip = ip
         self.mac = mac
 
 class DHCPC_ENTRY_FSM_MSG():
-    def __init__(self, client, event) -> None:
-        self.client = client
-        self.event = event
+    def __init__(self, func) -> None:
+        self.func = func
 
-class DHCPC_ENTRY():
+@acts_as_state_machine
+class DHCPC_ENTRY_FSM():
     nty_userbind_gen_cb = None
     non_userbind_cb = None
     max_retrans_times = 3
     __entry_id = 0
-
     dhcpc_que = NonBlockingQueueSimpleFactory.create_nonblockingqueue("realize")
 
+    INIT = State(initial=True)
+    SELECTING = State()
+    REQUESTING = State()
+    BOUND = State()
+    # [TODO]
+    # RENEWING = State()
+    # REBINDING = State()
+    # INIT_REBOOT = State()
+    # REBOOTING = State()
+
+    fsm_start = Event(from_states=(INIT, SELECTING, REQUESTING), to_state=SELECTING)
+    resend_discoverpkt = Event(from_states=SELECTING, to_state=SELECTING)
+    fsm_select = Event(from_states=SELECTING, to_state=SELECTING)
+    fsm_selected = Event(from_states=SELECTING, to_state=REQUESTING)
+    resend_requestpkt = Event(from_states=REQUESTING, to_state=REQUESTING)
+    fsm_noreply = Event(from_states=(SELECTING, REQUESTING, BOUND), to_state=INIT)
+    fsm_bound = Event(from_states=REQUESTING, to_state=BOUND)
+    fsm_admin_down = Event(from_states=(SELECTING, REQUESTING, BOUND), to_state=INIT)
+
+    @after('fsm_admin_down')
+    def _(self):
+        logger.debug("admin down")
+        self.clear_flag = True
+
+    @after('fsm_noreply')
+    def _(self):
+        self.retrans_times = 0
+
+    @after('fsm_start')
+    def _(self):
+        logger.debug("send a discover")
+        self.retrans_times = 0
+        self.gen_pkt = self.entry.gen_discover()
+        DHCPC_ENTRY_FSM.dhcpc_retrans_check(self)
+        sendp(self.gen_pkt, iface = conf.iface, verbose = False)
+    @after('resend_discoverpkt')
+    def _(self):
+        self.retrans_times += 1
+        if (self.retrans_times > DHCPC_ENTRY_FSM.max_retrans_times):
+            self.fsm_start()
+            return
+        sendp(self.gen_pkt, iface = conf.iface, verbose = False)
+
+    @after('fsm_select')
+    def _(self):
+        logger.debug("select a offer")
+        self.fsm_selected()
+
+    @after('resend_requestpkt')
+    def _(self):
+        self.retrans_times += 1
+        if (self.retrans_times > DHCPC_ENTRY_FSM.max_retrans_times):
+            self.fsm_start()
+            return
+        sendp(self.gen_pkt, iface = conf.iface, verbose = False)
+    @after('fsm_selected')
+    def _(self):
+        logger.debug("send a request")
+        self.retrans_times = 0
+        self.entry.get_attr_by_dhcp(self.rc_pkt)
+        self.gen_pkt = self.entry.gen_request()
+        sendp(self.gen_pkt, iface = conf.iface, verbose = False)
+
+    @before('fsm_bound')
+    def _(self):
+        logger.debug("recv ack")
+        self.entry.get_attr_by_dhcp(self.rc_pkt)
+        self.entry.req_attr['xid'] = 0x0
+        # if (sth is wrong):
+            # [TODO]
+    @after('fsm_bound')
+    def _(self):
+        logger.debug("do bound")
+        DHCPC_ENTRY_FSM.nty_userbind_gen_cb(self.entry)
+        DHCPC_ENTRY_FSM.dhcpc_retrans_check(self)
+
     def __init__(self, mode, pkt_cfg) -> None:
-        DHCPC_ENTRY.__entry_id += 1
-        self.id = DHCPC_ENTRY.__entry_id
+        DHCPC_ENTRY_FSM.__entry_id += 1
+        self.id = DHCPC_ENTRY_FSM.__entry_id
         self.entry = DHCPC_ENTRY_INST(mode, pkt_cfg)
         self.rc_pkt = None
         self.gen_pkt = None
         self.retrans_times = 0
-        self.current_state = DHCPS_STOP
+        self.clear_flag = False
 
     def set_nty_userbind_gen_cb(cb):
-        DHCPC_ENTRY.nty_userbind_gen_cb = cb
+        DHCPC_ENTRY_FSM.nty_userbind_gen_cb = cb
     def set_dhcpc_retrans_check(cb):
-        DHCPC_ENTRY.dhcpc_retrans_check = cb
+        DHCPC_ENTRY_FSM.dhcpc_retrans_check = cb
 
-    def start(self):
-        if (self.current_state == DHCPS_BIND):
-            return
-        self.current_state = DHCPS_INIT
-        self.init(None)
-
-    def get_fsm_fun(self):
-        func = self.stop
-        if (self.current_state == DHCPS_INIT):
-            func = self.init
-        elif (self.current_state == DHCPS_INIT_PROC):
-            func = self.init_proc
-        elif (self.current_state == DHCPS_SELECT):
-            func = self.select
-        elif (self.current_state == DHCPS_REQUEST_PROC):
-            func = self.request_proc
-        elif (self.current_state == DHCPS_BIND):
-            func = self.bind
-        elif (self.current_state == DHCPS_STOP):
-            func = self.stop
-        return func
-
-    def process_event(self, event):
-        if (self.current_state == DHCPS_INIT and event == DH_Send_Discover):
-            self.current_state = DHCPS_INIT_PROC
-        elif (self.current_state == DHCPS_INIT_PROC and event == DH_Recv_Offer):
-            self.current_state = DHCPS_SELECT
-        elif (self.current_state == DHCPS_INIT_PROC and event == DH_ReSend_Packet):
-            self.current_state = DHCPS_INIT_PROC
-        elif (self.current_state == DHCPS_SELECT and event == DH_Select_Done):
-            self.current_state = DHCPS_REQUEST_PROC
-        elif (self.current_state == DHCPS_REQUEST_PROC and event == DH_Recv_Ack):
-            self.current_state = DHCPS_BIND
-        elif (self.current_state == DHCPS_REQUEST_PROC and event == DH_ReSend_Packet):
-            self.current_state = DHCPS_REQUEST_PROC
-        elif (self.current_state == DHCPS_REQUEST_PROC and event == DH_NO_RECV_REPLY):
-            self.current_state = DHCPS_INIT
-        else: # 有一些可以忽略的异常情况，比如request_porc状态收到offer这是有可能的
-            return
-        self.get_fsm_fun()(event)
-        
-
-    def bound_show(self):
-        if (self.get_dhcpc_state() == DHCPS_BIND):
-            logger.debug("local bound, id:%d :ip(%s), mac(%s), server(%s)\n" % (self.id, self.entry.get_attr['get_ip'], self.entry.req_attr['mac'], self.entry.get_attr['server_id']))
-
-    def create_fsm_event(client, event):
-        DHCPC_ENTRY.dhcpc_que.put(DHCPC_ENTRY_FSM_MSG(client, event))
-    def get_fsm_event():
-        return DHCPC_ENTRY.dhcpc_que.get()
-    def deal_fsm_event_cb(msg:DHCPC_ENTRY_FSM_MSG):
-        state = msg.client.get_dhcpc_state()
-        event = msg.event
-        if (event == DH_ReSend_Packet and (state == DHCPS_INIT_PROC or state == DHCPS_REQUEST_PROC)
-        or (event == DH_Recv_Offer and state == DHCPS_INIT_PROC)
-        or (event == DH_Recv_Ack and state == DHCPS_REQUEST_PROC)
-        ):
-            msg.client.process_event(event)
-    def deal_fsm_event():
-        DHCPC_ENTRY.dhcpc_que.foreach(DHCPC_ENTRY.deal_fsm_event_cb)
-        PseudoThread.async_run_later_event(DHCPC_ENTRY.deal_fsm_event, 0.1)
-
-    def get_dhcpc_state(self):
+    def get_current_state(self):
         return self.current_state
 
-    def init(self, event):
-        # logger.debug("inci DHCPS_INIT")
-        self.process_event(DH_Send_Discover)
+    def start(self):
+        if (self.get_current_state() == "BOUND"):
+            return
+        self.fsm_start()
+    def stop(self):
+        DHCPC_ENTRY_FSM.join_event_queue(self.fsm_admin_down)
 
-    def init_proc(self, event):
-        # logger.debug("inci DHCPS_INIT_PROC")
+    def bound_show(self):
+        if (self.get_current_state() == "BOUND"):
+            logger.debug("local bound, id:%d :ip(%s), mac(%s), server(%s)\n" % (self.id, self.entry.get_attr['get_ip'], self.entry.req_attr['mac'], self.entry.get_attr['server_id']))
 
-        if (event == DH_Send_Discover):
-            self.gen_pkt = self.entry.gen_discover()
+    # thread safe
+    def join_event_queue(func):
+        DHCPC_ENTRY_FSM.dhcpc_que.put(DHCPC_ENTRY_FSM_MSG(func))
+    def fsm_event_queue_process():
+        DHCPC_ENTRY_FSM.dhcpc_que.foreach(DHCPC_ENTRY_FSM.deal_fsm_event_cb)
+        PseudoThread.async_run_later_event(DHCPC_ENTRY_FSM.fsm_event_queue_process, 0.1)
+    def get_fsm_event():
+        return DHCPC_ENTRY_FSM.dhcpc_que.get()
+    def deal_fsm_event_cb(msg:DHCPC_ENTRY_FSM_MSG):
+        if msg and msg.func:
+            try:
+                # [TODO] if (self.clear_flag): return
+                msg.func()
+            except InvalidStateTransition as err:
+                pass
+            
 
-            DHCPC_ENTRY.dhcpc_retrans_check(self)
-            sendp(self.gen_pkt, iface = conf.iface, verbose = False)
-            #等待offer中
-        elif (event == DH_ReSend_Packet):
-            sendp(self.gen_pkt, iface = conf.iface, verbose = False)
-        else:
-            logger.debug("DHCPS_INIT_PROC", event)
-            #client.fsm.process_event(DH_Admin_stop)
-        logger.debug("send a discover")
-    def select(self, event):
-        #logger.debug("inci DHCPS_INIT_SELECT")
-        if (event == DH_Recv_Offer):
-            #目前收到一个offer立即去发送request，不选择offer
-            self.process_event(DH_Select_Done)
-        else:
-            logger.debug("DHCPS_SELECT", event)
-            #client.fsm.process_event(DH_Admin_stop)
 
-    def request_proc(self, event):
-        #logger.debug("inci DHCPS_REQUEST_PROC")
-        if (event == DH_Select_Done or event == DH_ReSend_Packet):
-            if (event != DH_ReSend_Packet):
-                self.retrans_times = 0
-            else:
-                self.retrans_times += 1
-
-            if (self.retrans_times > DHCPC_ENTRY.max_retrans_times):
-                self.process_event(DH_NO_RECV_REPLY)
-                return
-
-            self.entry.get_attr_by_dhcp(self.rc_pkt)
-            pkt = self.entry.gen_request()
-
-            sendp(pkt, iface = conf.iface, verbose = False)
-            #等待ack
-        else:
-            logger.debug("DHCPS_REQUEST_PROC", event)
-            #client.fsm.process_event(DH_Admin_stop)
-
-    def bind(self, event):
-        #logger.debug("inci DHCPS_BIND")
-        if (event == DH_Recv_Ack):
-            #进入bind状态
-            self.entry.get_attr_by_dhcp(self.rc_pkt)
-            self.entry.req_attr['xid'] = 0x0
-            DHCPC_ENTRY.nty_userbind_gen_cb(self.entry)
-            DHCPC_ENTRY.dhcpc_retrans_check(self)
-        else:
-            pass
-            #client.fsm.process_event(DH_Admin_stop)
-    def stop(self, event):
-        #logger.debug("inci DHCPS_STOP")
-        pass

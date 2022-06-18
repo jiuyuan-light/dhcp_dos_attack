@@ -1,5 +1,5 @@
 # -*- coding:utf-8 -*-
-from dhcp_client_fsm import *
+from dhcpc_fsm_model import *
 from dhcp_sup import PseudoThread
 from scapy.all import *
 from scapy.layers.dhcp import BOOTP, DHCP
@@ -15,7 +15,7 @@ def dhcp_sniff_pkt_cb(packet):
     if (packet[BOOTP].op == 2):
         for client in DhcpcControlCenter.get_dhcpc_list():
             entry = client.entry
-            if (client.get_dhcpc_state() == DHCPS_BIND):
+            if (client.get_current_state() == "BOUND"):
                 continue
             if (entry.req_attr['xid'] == packet[BOOTP].xid and entry.req_attr['chaddr'] == packet[BOOTP].chaddr[:len(entry.req_attr['chaddr'])]):
                 # logger.debug('SRC[%s] DST[%s] [%s]' % (packet[IP].src, packet[IP].dst, packet[BOOTP].yiaddr))
@@ -23,16 +23,13 @@ def dhcp_sniff_pkt_cb(packet):
                     if (len(mess) == 2 and mess[0] == 'message-type'):
                         client.rc_pkt = packet
                         if (mess[1] == 2): #offer
-                            DHCPC_ENTRY.create_fsm_event(client, DH_Recv_Offer)
+                            DHCPC_ENTRY_FSM.join_event_queue(client.fsm_select)
                             break
                         elif (mess[1] == 5): #ack
-                            DHCPC_ENTRY.create_fsm_event(client, DH_Recv_Ack)
+                            DHCPC_ENTRY_FSM.join_event_queue(client.fsm_bound)
                             break
                         else:
-                            logger.debug("curr state(%d) recv(%d)pkt" %(client.get_dhcpc_state(), mess[1])) # 可能是NAK
-            else:
-                #logger.debug("not except packet, ignore")
-                pass
+                            logger.debug("curr state(%d) recv(%d)pkt" %(client.get_current_state(), mess[1])) # 可能是NAK
 
 def show_state():
     logger.debug("all client count:%d bound count:%d , ..." % (DhcpcControlCenter.get_dhcpc_cnt(), DhcpcControlCenter.get_dhcpc_bind_cnt()))
@@ -66,12 +63,12 @@ class DhcpcControlCenter():
         DhcpcControlCenter.nty_userbind_gen_cb = cb
 
     def create_new_detail_client(self, pkt_cfg):
-        DhcpcControlCenter.__client_list.append(DHCPC_ENTRY(1, pkt_cfg))
+        DhcpcControlCenter.__client_list.append(DHCPC_ENTRY_FSM(1, pkt_cfg))
     def create_new_client(self, mode, pkt_cfg):
         if (mode == 1):
             self.create_new_detail_client(pkt_cfg)
         else:
-            DhcpcControlCenter.__client_list.append(DHCPC_ENTRY(0, None))
+            DhcpcControlCenter.__client_list.append(DHCPC_ENTRY_FSM(0, None))
 
     def userbind_entryinfo_gen_cb(self, entry):
         DhcpcControlCenter.__dhcpc_bound_nums += 1
@@ -80,7 +77,7 @@ class DhcpcControlCenter():
         DhcpcControlCenter.nty_userbind_gen_cb(DhcpcBindsEntryInfo(entry.get_attr['get_ip'], entry.req_attr['mac']))
 
     def dhcpc_retrans_check(client):
-        if (client.get_dhcpc_state() == DHCPS_BIND):
+        if (client.get_current_state() == "BOUND" or client.get_current_state() == "INIT"):
             if client in DhcpcControlCenter.__clients_re_trans_list:
                 DhcpcControlCenter.__clients_re_trans_list.remove(client)
         else:
@@ -97,6 +94,8 @@ class DhcpcControlCenter():
         return DhcpcControlCenter.__client_list
 
     def clearALL(self):
+        for client in DhcpcControlCenter.get_dhcpc_list():
+            client.stop()
         DhcpcControlCenter.__client_list = []
         DhcpcControlCenter.__dhcpc_bound_nums = 0
 
@@ -105,8 +104,8 @@ class DhcpcControlCenter():
             client.start()
     def __init__(self):
         # 注册通知函数
-        DHCPC_ENTRY.set_nty_userbind_gen_cb(self.userbind_entryinfo_gen_cb)
-        DHCPC_ENTRY.set_dhcpc_retrans_check(DhcpcControlCenter.dhcpc_retrans_check)
+        DHCPC_ENTRY_FSM.set_nty_userbind_gen_cb(self.userbind_entryinfo_gen_cb)
+        DHCPC_ENTRY_FSM.set_dhcpc_retrans_check(DhcpcControlCenter.dhcpc_retrans_check)
 
         # dhcpc_main配置
         self.async_sniff_replypkt_thread = None
@@ -144,13 +143,17 @@ class DhcpcControlCenter():
         for i in range(self.nums):
             self.create_new_client(self.mode, self.pkt_cfg)
         self.start()
-        PseudoThread.async_run_later_event(DHCPC_ENTRY.deal_fsm_event, 0.1)
+        PseudoThread.async_run_later_event(DHCPC_ENTRY_FSM.fsm_event_queue_process, 0.1)
         PseudoThread.async_run_now(show_state)
-        PseudoThread.async_run_later_event(DhcpcControlCenter.dhcp_re_trans, DHCPC_PKT_RETRANS_TIME)
+        PseudoThread.async_run_later_event(DhcpcControlCenter.dhcpc_retrans_work, DHCPC_PKT_RETRANS_TIME)
         #主线程不退出
         PseudoThread.run_forever()
 
-    def dhcp_re_trans():
+    def dhcpc_retrans_work():
         for client in DhcpcControlCenter.__clients_re_trans_list:
-            DHCPC_ENTRY.create_fsm_event(client, DH_ReSend_Packet)
-        PseudoThread.async_run_later_event(DhcpcControlCenter.dhcp_re_trans, DHCPC_PKT_RETRANS_TIME)
+            if client.get_current_state() == "SELECTING":
+                DHCPC_ENTRY_FSM.join_event_queue(client.resend_discoverpkt)
+            elif client.get_current_state() == "REQUESTING":
+                DHCPC_ENTRY_FSM.join_event_queue(client.resend_requestpkt)
+            
+        PseudoThread.async_run_later_event(DhcpcControlCenter.dhcpc_retrans_work, DHCPC_PKT_RETRANS_TIME)

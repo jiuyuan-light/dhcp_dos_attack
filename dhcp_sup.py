@@ -5,7 +5,7 @@ from scapy.sendrecv import sendp
 from scapy.all import *
 from collections import namedtuple
 import copy
-from dhcp_client_fsm import *
+from dhcpc_fsm_model import *
 import gevent
 from PyQt6.QtNetwork import QNetworkInterface
 

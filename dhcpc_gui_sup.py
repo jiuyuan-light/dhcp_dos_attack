@@ -55,7 +55,7 @@ class DHCPC_OPTION_SET(QDialog):
         # be_del_data = "是否删除数据option({op})?".format(op=op)
         # msg = QMessageBox(QMessageBox.Icon.NoIcon, "提示", be_del_data, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, None)
         # if (msg.exec() == QMessageBox.StandardButton.Yes):
-        #     print("Del")
+        #     logger.debug("Del")
     def onClickAdd(self):
         op = get_firstint_fromstr(self.option.text())
         if (op is None):
@@ -315,7 +315,7 @@ class DHCPC_PKT_TABLEWIDGET(QTableWidget):
                     text = item.text()
                     if (text.find("option(") == 0 and get_firstint_fromstr(text) == option):
                         self.removeRow(row)
-                        print(option, text, row)
+                        logger.debug(option, text, row)
                         break
 
 
@@ -397,7 +397,7 @@ class DHCPC_PKT_CFG_FROMUI():
                         self.file = value
                     elif (text.find("option") == 0 and opint):
                         self.ops[opint] = value
-                        # print("BB:", type(opint),opint, value)
+                        # logger.debug("BB:", type(opint),opint, value)
                     
     def get_op(self):
         return self.op

@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import QMainWindow, QApplication, QWidget, QHBoxLayout, QFo
                             QStyle, QStylePainter
 from PyQt6.QtCore import QAbstractTableModel, Qt, QModelIndex, QVariant, pyqtSignal, QEvent, QSize
 from PyQt6.QtGui import QStandardItem
-from dhcp_client_fsm import DhcpcBindsEntryInfo, NetCardInfo, DHCPC_PKT_CFG
+from dhcpc_fsm_model import DhcpcBindsEntryInfo, NetCardInfo, DHCPC_PKT_CFG
 from dhcpc_control import DhcpcControlCenter
 
 from dhcpc_gui_sup import DHCPC_PKT_MODEL, DHCPC_PKT_TABLEWIDGET
@@ -148,9 +148,9 @@ class UserInputWidget(QWidget):
 
     def pr_thread_info(self):
         length = len(threading.enumerate())
-        print('### START ### 当前运行的线程数为：%d' % length)
-        print(threading.enumerate())
-        print('### END ###')
+        logger.debug('### START ### 当前运行的线程数为：%d' % length)
+        logger.debug(threading.enumerate())
+        logger.debug('### END ###')
 
     def user_input_dhcpcnum(self):
         if (self.dhcpc_num_lineed.text()):
